@@ -2,14 +2,16 @@ package game
 
 import (
 	"fmt"
+	"time"
 	"math/rand"
 )
 
 const (
-	blank =  0
-	dugUp = -1
-	mine  = -2
-	flag  = -3
+	blank       =  0
+	dugUp       = -1
+	mine        = -2
+	flag        = -3
+	flaggedMine = -4
 )
 
 const (
@@ -18,27 +20,36 @@ const (
 	MineTriggered = iota
 	OutOfBounds = iota
 	AlreadyDugUp = iota
+	Victory = iota
 )
 
-type Board struct {
-	rows uint
-	cols uint
-	board [][]int
-	spacesLeft uint
+type tuple struct {
+	x, y int
 }
 
-func NewBoard(m, rows, cols uint) Board {
-	board := make([][]int, rows, rows)
+type Board struct {
+	rows int
+	cols int
+	board [][]int8
+	spacesLeft int
+}
 
-	for i := uint(0); i < rows; i++ {
-		board[i] = make([]int, cols, cols)
+func NewBoard(m, rows, cols int) Board {
+	board := make([][]int8, rows, rows)
+
+	for i := 0; i < rows; i++ {
+		board[i] = make([]int8, cols, cols)
 	}
 
-	for currentMines := uint(0); currentMines < m; {
-		r := rand.Uint32()
+	s1 := rand.NewSource(time.Now().UnixNano())
+	r  := rand.New(s1)
 
-		i := uint(r & 0x000F) % rows
-		j := uint(r & 0x00F0) % cols
+	for currentMines := 0; currentMines < m; {
+		i := int8(r.Int31n(int32(rows)))
+		j := int8(r.Int31n(int32(cols)))
+
+		if i < 0 { i *= -1 }
+		if j < 0 { j *= -1 }
 
 		if board[i][j] == mine { continue }
 		board[i][j] = mine
@@ -53,30 +64,57 @@ func NewBoard(m, rows, cols uint) Board {
 	}
 }
 
-func (b *Board) Print() {
-	fmt.Print("   ")
-	for i := uint(0); i < b.cols; i++ {
-		fmt.Printf(" %2d", i)
+func (b *Board) Winrar() {
+	b.printCols()
+	for i, subarray := range b.board {
+		fmt.Printf("%2d[", i)
+		for _, val := range subarray {
+			switch val {
+			case mine:
+				fmt.Print("  ☠")
+			default:
+				fmt.Print("   ")
+			}
+		}
+		fmt.Printf("  ]%2d\n", i)
 	}
-	fmt.Println()
+	b.printCols()
+}
 
+func (b *Board) Print() {
+	b.printCols()
 	for i, subarray := range b.board {
 		fmt.Printf("%2d[", i)
 		for _, val := range subarray {
 			switch val {
 			case blank, mine:
-				fmt.Print("  █")
+				fmt.Print(" ██")
 			case dugUp:
 				fmt.Print("   ")
-			case flag:
+			case flag, flaggedMine:
 				fmt.Print("  ⚐")
+			default:
+				fmt.Printf("  %d", val)
 			}
 		}
-		fmt.Println("  ]")
+		fmt.Printf("  ]%2d\n", i)
 	}
+	b.printCols()
 }
 
-func (b *Board) Dig(i, j uint) int {
+func (b *Board) printCols() {
+	fmt.Print("   ")
+	for i := 0; i < b.cols; i++ {
+		fmt.Printf(" %2d", i)
+	}
+	fmt.Println()
+}
+
+func (b *Board) Spaces() int {
+	return b.spacesLeft
+}
+
+func (b *Board) Dig(i, j int) int {
 	if i > b.rows - 1 || j > b.cols - 1 {
 		return OutOfBounds
 	}
@@ -84,25 +122,60 @@ func (b *Board) Dig(i, j uint) int {
 	switch b.board[i][j] {
 	case mine:
 		return MineTriggered
-	case flag:
+	case flag, flaggedMine:
 		return DigOnFlag
 	case blank:
 		b.look(i, j)
+		if b.spacesLeft == 0 { return Victory }
 		return Ok
 	default:
 		return AlreadyDugUp
 	}
 }
 
-func (b *Board) look(i, j uint) {
-	adjacentMines := 0
+func (b *Board) FlagToggle(i, j int) int {
+	if i > b.rows - 1 || j > b.cols - 1 {
+		return OutOfBounds
+	}
 
-	type tuple struct { x, y uint }
+	switch b.board[i][j] {
+	case flag:
+		b.board[i][j] = blank
+	case blank:
+		b.board[i][j] = flag
+	case flaggedMine:
+		b.board[i][j] = mine
+	case mine:
+		b.board[i][j] = flaggedMine
+	default:
+		// noop for revealed spaces; numbered and dugup
+	}
+
+	return Ok
+}
+
+func (b *Board) look(i, j int) {
+	switch b.board[i][j] {
+	case dugUp, mine, flaggedMine:
+		return
+	case blank, flag:
+		// noop; if blank, we want to continue, find how many mines are around it
+		// if flag, then the user was wrong about the placement, so we dig it up anyways
+	default:
+		return // already numbered with
+	}
+
+	b.spacesLeft--
+	if b.spacesLeft == 0 { return }
+
+	adjacentMines := int8(0)
 
 	queue := make([]tuple, 0, 8)
 
-	for wprobe := i - 1; wprobe <= i + 1 && wprobe >= 0 && wprobe < b.rows; wprobe++ {
-		for hprobe := j - 1; hprobe <= j + 1 && hprobe >= 0 && hprobe < b.cols; hprobe++ {
+	rowStart, rowEnd, colStart, colEnd := b.boundaryCheck(i - 1, i + 1, j - 1, j + 1)
+
+	for wprobe := rowStart; wprobe <= rowEnd; wprobe++ {
+		for hprobe := colStart; hprobe <= colEnd; hprobe++ {
 			switch b.board[wprobe][hprobe] {
 			case mine:
 				adjacentMines++
@@ -116,11 +189,30 @@ func (b *Board) look(i, j uint) {
 
 	if adjacentMines == 0 {
 		b.board[i][j] = dugUp
+		for _, coordinate := range queue {
+			b.look(coordinate.x, coordinate.y)
+		}
 	} else {
 		b.board[i][j] = adjacentMines
 	}
+}
 
-	for _, coordinate := range queue {
-		b.look(coordinate.x, coordinate.y)
+func (b *Board) boundaryCheck(rowStart, rowEnd, colStart, colEnd int) (int, int, int, int) {
+	if rowStart < 0 {
+		rowStart = 0
 	}
+
+	if colStart < 0 {
+		colStart = 0
+	}
+
+	if rowEnd >= b.rows {
+		rowEnd = b.rows - 1
+	}
+
+	if colEnd >= b.cols {
+		colEnd = b.cols - 1
+	}
+
+	return rowStart, rowEnd, colStart, colEnd
 }
